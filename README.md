@@ -1,56 +1,70 @@
 # TSMate · 组网助手
 
-Tailscale 组网 / 网络优化管理的 iOS 客户端界面复刻版（原生 Swift + SwiftUI）。
+iOS 上的 Tailscale 组网 / 网络优化管理助手。原生 Swift + SwiftUI，最低 iOS 16.0，无 Apple 证书，使用 TrollStore 直装（.tipc）或侧载（.ipa）。
 
-- 显示名：**组网助手**
-- Bundle ID：`com.niugit.tsmate`
-- 最低系统：**iOS 16.0**
-- 目标设备：iOS 16.1 + TrollStore（巨魔）免证书安装
-- 配色：主蓝 `#1B6EF3` / 强调青 `#00C2A8` / 墨黑 `#0B0B0C`
-
-## 一期范围
-
-本期为 **UI 复刻外壳**：完整还原截图中的全部模块，数据取自截图真实值写死。
+## 一期已实现（真实功能）
 
 | 模块 | 说明 |
 | --- | --- |
-| 顶部栏 | 汉堡菜单、模式下拉（强制直连）、`2/5在线`、TS 头像、退出 |
-| 四张状态卡 | 组网速率 / 网络优化 / 启动 Tailscale / SD-WAN |
-| 我的设备 | 新设备自动入网、IP 隐藏两个开关 + 5 台设备列表（设备 / IP / 状态） |
-| 策略卡 | 直连达标（5ms ≤ 40ms），超时断开重连改走国内直连 |
-| 模式四按钮 | P2P 直连 / 中继优先 / 强制直连 / 子网路由，单选高亮并写日志 |
-| 运行日志 | 黑底控制台，4 条种子日志 + 定时追加带时间戳的模拟行 |
+| 本机状态探测 | `getifaddrs` 枚举真实网卡，识别 Wi-Fi / 蜂窝 / 有线、Tailscale IPv4（100.64/10）与 IPv6（fd7a:115c:a1e0::/48）、双栈判定 |
+| 真实时延与丢包 | 对局域网网关（优先）或国内 DNS（223.5.5.5 / 114.114.114.114）做真实 TCP 握手，取中位时延与丢包率 |
+| 真实设备列表 | Tailscale Admin API `GET /api/v2/tailnet/{tailnet}/devices`，显示名称 / 系统 / 客户端版本 / 最近在线 / 全部地址 |
+| 真实设备时延 | 对每台在线设备的 Tailnet IP 依次尝试管理端口、22、445、80 做真实 TCP 握手 |
+| 待授权设备 | 识别 `unauthorized` 设备，可单台授权；「新设备自动入网」开关会批量授权 |
+| 模式写回 | 四个模式按钮会真实写回 tailnet 偏好（ExitNodeID / RouteAll / ShieldsUp / CorpDNS / NoPortForwarding / AdvertiseExitNode） |
+| 策略执行 | 实测时延超过阈值（默认 40ms）立即断开重连并强制改走国内直连 |
+| IP 隐藏 | 列表中 IP 掩码显示（100.116.*.*），可在设置里开关 |
 
-## 二期（Tailscale 真集成）
+## 二期（已留接口）
 
-`TSMate/Services/TailscaleService.swift` 定义了协议 `TailscaleServicing`，
-一期由 `MockTailscaleService` 提供写死数据；二期替换为 LocalAPI 客户端：
+- 与 Tailscale 客户端 LocalAPI（Mac / Windows：`http://127.0.0.1:41112/localapi/v1/...`）互通
+- 本机子网路由表与分流策略可视化
+- 后台持续探测与通知
 
-- `GET  /api/v2/status`   → 连接状态、出口节点、延迟
-- `GET  /api/v2/peer`     → 设备列表
-- `POST /api/v2/preferences` → 模式 / 开关落地
+## 配置 Tailscale Admin API
 
-API Key 在 `SettingsStore` 中配置（Tailscale 客户端「设置 → 偏好设置 → 运营控制」生成）。
+1. 打开 <https://login.tailscale.com/admin/settings/keys> 创建 API Key（建议勾选 Devices:Read / Devices:Write / DNS:Read）。
+2. 打开 App 右上角齿轮 → 「Tailscale 接入」，填入：
+   - API Key（`tskey-…`）
+   - tailnet，形如 `user@example.com`
+3. 点「测试连接」确认，返回设备台数即成功。
+
+> API Key 与 tailnet 存入 iOS Keychain，不写 UserDefaults。
+
+## 关于 Tailscale 隧道
+
+iOS 上 Tailscale 隧道必须由官方 App 建立，本 App 右上角电源按钮会直接跳转 Tailscale 官方 App，请在那里点击「连接」。本 App 负责真实探测、真实设备管理、待授权设备入网与 tailnet 偏好写回。
 
 ## 构建
 
-本仓库不提交 `.xcodeproj`，改用 [XcodeGen](https://github.com/yonaskolb/XcodeGen) 从 `project.yml` 生成：
+GitHub Actions 自动编译（`macos-15`）：
 
 ```bash
-brew install xcodegen
+brew install xcodegen ldid
 xcodegen generate
-xcodebuild -project TSMate.xcodeproj -scheme TSMate -sdk iphoneos \
-  -configuration Release -derivedDataPath build CODE_SIGNING_ALLOWED=NO build
+xcodebuild -scheme TSMate -configuration Release -sdk iphoneos build \
+  CODE_SIGN_IDENTITY="" CODE_SIGNING_REQUIRED=NO CODE_SIGNING_ALLOWED=NO
+codesign --force --deep --sign - build/.../TSMate.app
+ldid -Sscripts/entitlements.plist build/.../TSMate.app
 ```
 
-GitHub Actions 会自动完成：生成工程 → 编译 → `ldid` 伪签 → 打包 `.ipa` 与 `.tipc` → 上传 Artifact。
+产物：
 
-## 安装（TrollStore）
+- `TSMate-1.0.0.tipc` —— TrollStore 直装
+- `TSMate-1.0.0.ipa` —— 备用侧载
 
-1. 在 iOS 16.1 设备上安装 TrollStore 2（TrollInstallerX / TrollStar 方式）。
-2. 从本仓库 Actions 的 Artifacts 下载 `TSMate-1.0.0.ipa`。
-3. 用 TrollStore 打开该 IPA 安装即可（TrollStore 会用 CoreTrust 证书重签，无需 Apple 开发者证书）。
+## 目录结构
 
-## License
+```
+TSMate/
+├─ Models/        Device / DeviceStatus / ConnectionMode / LogEntry / StatusCard / SampleData
+├─ Services/      TailscaleManager / TailscaleAPIClient / NetworkProbe / LogStore / SettingsStore / KeychainStore
+├─ ViewModels/    AppModel（真实状态、刷新、策略执行、探测与授权）
+├─ Views/         AppView / SettingsView / Components（TopBar、StatusCardView、DeviceListCard、DeviceDetailView、PolicyCard、ModeSelector、LogConsole）
+├─ Theme/         Theme（#1B6EF3 主蓝 / #00C2A8 青 / #0B0B0C 墨黑）
+└─ TSMateApp.swift
+```
 
-MIT
+## 许可
+
+仅供个人组网管理使用。Tailscale 为其各自所有者的商标。

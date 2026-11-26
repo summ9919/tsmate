@@ -1,7 +1,7 @@
 import SwiftUI
 
 struct LogConsole: View {
-    @ObservedObject var model: AppModel
+    @ObservedObject private var store = LogStore.shared
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -11,7 +11,7 @@ struct LogConsole: View {
                     .font(.system(size: 11, weight: .semibold))
                     .foregroundColor(Theme.logDim)
                 Spacer()
-                Text("\(model.logs.count) 条")
+                Text("\(store.entries.count) 条")
                     .font(.system(size: 10))
                     .foregroundColor(Theme.logDim)
             }
@@ -19,7 +19,7 @@ struct LogConsole: View {
             ScrollViewReader { proxy in
                 ScrollView {
                     VStack(alignment: .leading, spacing: 3) {
-                        ForEach(model.logs) { entry in
+                        ForEach(store.entries) { entry in
                             HStack(alignment: .top, spacing: 6) {
                                 Text(entry.time)
                                     .font(.system(size: 9.5, design: .monospaced))
@@ -35,7 +35,7 @@ struct LogConsole: View {
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
                 }
-                .onChange(of: model.logs.count) { _ in
+                .onChange(of: store.entries.count) { _ in
                     withAnimation(.linear(duration: 0.2)) {
                         proxy.scrollTo("bottom", anchor: .bottom)
                     }

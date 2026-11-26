@@ -15,14 +15,14 @@ struct TopBar: View {
             .buttonStyle(.plain)
 
             Menu {
-                ForEach(ConnectionMode.allCases) { m in
+                ForEach(ConnectionMode.allCases) { item in
                     Button {
-                        model.select(mode: m)
+                        model.select(mode: item)
                     } label: {
-                        if m == model.mode {
-                            Label(m.rawValue, systemImage: "checkmark")
+                        if item == model.mode {
+                            Label(item.rawValue, systemImage: "checkmark")
                         } else {
-                            Text(m.rawValue)
+                            Text(item.rawValue)
                         }
                     }
                 }
@@ -64,6 +64,24 @@ struct TopBar: View {
                         .font(.system(size: 11, weight: .bold))
                         .foregroundColor(.white)
                 )
+
+            Button {
+                model.openTailscaleApp()
+            } label: {
+                Image(systemName: "power.circle.fill")
+                    .font(.system(size: 17))
+                    .foregroundColor(model.status.isRunning ? Theme.okGreen : Theme.subText)
+            }
+            .buttonStyle(.plain)
+
+            Button {
+                model.openSettings()
+            } label: {
+                Image(systemName: "gearshape.fill")
+                    .font(.system(size: 16))
+                    .foregroundColor(Theme.ink)
+            }
+            .buttonStyle(.plain)
 
             Button("退出") {
                 model.logout()

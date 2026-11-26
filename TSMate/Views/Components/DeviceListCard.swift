@@ -10,10 +10,31 @@ struct DeviceListCard: View {
                     .font(.system(size: 15, weight: .bold))
                     .foregroundColor(Theme.ink)
                 Spacer()
+                Button {
+                    Task { await model.refresh() }
+                } label: {
+                    if model.isRefreshing {
+                        ProgressView().controlSize(.mini)
+                    } else {
+                        Image(systemName: "arrow.clockwise")
+                            .font(.system(size: 13, weight: .semibold))
+                            .foregroundColor(Theme.brand)
+                    }
+                }
+                .buttonStyle(.plain)
             }
             .padding(.horizontal, 14)
             .padding(.top, 14)
             .padding(.bottom, 8)
+
+            if model.isUsingSampleData {
+                Text("示例数据 · 点右上角设置填入 Tailscale API Key 后显示真实设备")
+                    .font(.system(size: 10.5))
+                    .foregroundColor(Theme.brand)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 14)
+                    .padding(.bottom, 8)
+            }
 
             VStack(spacing: 12) {
                 Toggle(isOn: Binding(
@@ -43,11 +64,11 @@ struct DeviceListCard: View {
 
             HStack(spacing: 0) {
                 Text("设备")
-                    .frame(width: 118, alignment: .leading)
+                    .frame(width: 112, alignment: .leading)
                 Text("IP")
                     .frame(maxWidth: .infinity, alignment: .leading)
                 Text("状态")
-                    .frame(width: 52, alignment: .trailing)
+                    .frame(width: 62, alignment: .trailing)
             }
             .font(.system(size: 11, weight: .medium))
             .foregroundColor(Theme.subText)
@@ -58,7 +79,12 @@ struct DeviceListCard: View {
 
             VStack(spacing: 0) {
                 ForEach(Array(model.devices.enumerated()), id: \.element.id) { index, device in
-                    deviceRow(device)
+                    Button {
+                        model.openDevice(device)
+                    } label: {
+                        deviceRow(device)
+                    }
+                    .buttonStyle(.plain)
                     if index < model.devices.count - 1 {
                         Divider().overlay(Theme.line.opacity(0.7))
                     }
@@ -83,29 +109,46 @@ struct DeviceListCard: View {
                     .foregroundColor(Theme.subText)
                     .lineLimit(1)
             }
-            .frame(width: 118, alignment: .leading)
+            .frame(width: 112, alignment: .leading)
 
             VStack(alignment: .leading, spacing: 2) {
                 Text(model.ipText(for: device))
                     .font(.system(size: 11.5))
                     .foregroundColor(Theme.ink)
-                Text("端口 \(device.port)")
+                Text(device.latencyMs > 0 ? "\(device.latencyMs) ms" : "端口 \(device.port)")
                     .font(.system(size: 9.5))
-                    .foregroundColor(Theme.subText)
+                    .foregroundColor(device.latencyMs > 0 ? Theme.okGreen : Theme.subText)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
 
             Text(device.statusText)
                 .font(.system(size: 10.5, weight: .semibold))
-                .foregroundColor(device.isOnline ? .white : Theme.subText)
+                .foregroundColor(statusTextColor(device))
                 .padding(.horizontal, 8)
                 .padding(.vertical, 3)
                 .background(
-                    Capsule().fill(device.isOnline ? Theme.okGreen : Theme.bg)
+                    Capsule().fill(statusBackground(device))
                 )
-                .frame(width: 52, alignment: .trailing)
+                .frame(width: 62, alignment: .trailing)
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 9)
+        .contentShape(Rectangle())
+    }
+
+    private func statusTextColor(_ device: Device) -> Color {
+        switch device.status {
+        case .online: return .white
+        case .pending: return Theme.ink
+        case .offline: return Theme.subText
+        }
+    }
+
+    private func statusBackground(_ device: Device) -> Color {
+        switch device.status {
+        case .online: return Theme.okGreen
+        case .pending: return Theme.yellow
+        case .offline: return Theme.bg
+        }
     }
 }
