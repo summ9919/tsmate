@@ -1,9 +1,4 @@
+.local/
+dist/
+dist2/
 build/
-pkg/
-DerivedData/
-*.xcodeproj
-*.xcworkspace
-xcuserdata/
-.DS_Store
-*.ipa
-*.tipc
