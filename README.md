@@ -21,6 +21,12 @@ iOS 上的 Tailscale 组网 / 网络优化管理助手。原生 Swift + SwiftUI�
 - 本机子网路由表与分流策略可视化
 - 后台持续探测与通知
 
+## 版本
+
+| 版本 | 内容 |
+| --- | --- |
+| 1.1.0 | 真实功能版：Admin API 设备列表、真实时延与丢包探测、待授权设备入网、tailnet 偏好写回、Keychain 凭据、设置页与设备详情页 |
+
 ## 配置 Tailscale Admin API
 
 1. 打开 <https://login.tailscale.com/admin/settings/keys> 创建 API Key（建议勾选 Devices:Read / Devices:Write / DNS:Read）。
@@ -48,10 +54,18 @@ codesign --force --deep --sign - build/.../TSMate.app
 ldid -Sscripts/entitlements.plist build/.../TSMate.app
 ```
 
-产物：
+产物（Actions artifact 名 `TSMate-1.1.0`）：
 
-- `TSMate-1.0.0.tipc` —— TrollStore 直装
-- `TSMate-1.0.0.ipa` —— 备用侧载
+- `TSMate-1.1.0.tipc` —— TrollStore 直装
+- `TSMate-1.1.0.ipa` —— 备用侧载
+
+## 安装（TrollStore）
+
+1. 从 Actions 下载 artifact `TSMate-1.1.0`（或取仓库 `dist/TSMate-1.1.0/` 目录）。
+2. 把 `TSMate-1.1.0.tipc` 传到手机（AirDrop / 微信文件传输助手 / iCloud）。
+3. 用 TrollStore 打开该文件 → Install。
+4. 首次启动后点右上角齿轮填入 API Key 与 tailnet，点「测试连接」验证。
+5. 右上角电源按钮跳转 Tailscale 官方 App，点「连接」建立隧道。
 
 ## 目录结构
 
