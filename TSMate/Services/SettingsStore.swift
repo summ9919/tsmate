@@ -11,7 +11,7 @@ final class SettingsStore: ObservableObject {
     @Published var apiKey: String {
         didSet {
             guard apiKey != oldValue else { return }
-            KeychainStore.set(apiKey, forKey: Keys.apiKey)
+            KeychainStore.set(apiKey, for: Keys.apiKey)
             if !apiKey.isEmpty { LogStore.shared.append("已保存 Tailscale API Key") }
         }
     }
@@ -19,7 +19,8 @@ final class SettingsStore: ObservableObject {
     /// tailnet 名称，形如 user@example.com
     @Published var tailnet: String {
         didSet {
-            KeychainStore.set(tailnet, forKey: Keys.tailnet)
+            guard tailnet != oldValue else { return }
+            KeychainStore.set(tailnet, for: Keys.tailnet)
             if !tailnet.isEmpty { LogStore.shared.append("已保存 tailnet：\(tailnet)") }
         }
     }

@@ -99,7 +99,10 @@ enum NetworkProbe {
             item.isIPv4 && item.name == "en0"
         }
         if hasWiFi { return "Wi-Fi" }
-        if interfaces().contains { item in item.isIPv4 && item.name.hasPrefix("bridge") } {
+        let hasBridge = interfaces().contains { item in
+            item.isIPv4 && item.name.hasPrefix("bridge")
+        }
+        if hasBridge {
             return "有线"
         }
         return "未知"
@@ -145,7 +148,7 @@ enum NetworkProbe {
         return await withCheckedContinuation { (continuation: CheckedContinuation<Int?, Never>) in
             let conn = NWConnection(host: NWEndpoint.Host(host), port: endpointPort, using: .tcp)
 
-            func finish(_ value: Int?) {
+            let finish: (Int?) -> Void = { value in
                 queue.async {
                     if latch.claim() {
                         conn.cancel()
@@ -224,12 +227,12 @@ enum NetworkProbe {
 }
 
 /// DNS 解析结果容器（避免跨线程改写局部变量）
-private final class DNSBox {
+private final class DNSBox: @unchecked Sendable {
     var value: String?
 }
 
 /// 保证 continuation 只恢复一次
-private final class ProbeLatch {
+private final class ProbeLatch: @unchecked Sendable {
     private var used = false
     private let lock = NSLock()
 
