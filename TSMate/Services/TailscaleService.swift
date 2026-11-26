@@ -52,19 +52,20 @@ final class LocalAPITailscaleService: TailscaleServicing {
 
     func status() async throws -> TailscaleStatus {
         let s = try await get("/localapi/v1/status", as: TSStatus.self)
+        let me = s.SelfNode
         return TailscaleStatus(backendState: s.BackendState ?? "Unknown",
-                               relay: s.Self?.Relay ?? s.Health.first ?? "—",
+                               relay: me?.Relay ?? s.Health?.first ?? "—",
                                latencyMs: 0,
                                packetLoss: 0,
-                               connectionType: s.Self?.OS.map { "\($0) · 本机 LocalAPI" } ?? "本机 LocalAPI",
+                               connectionType: me?.OS.map { "\($0) · 本机 LocalAPI" } ?? "本机 LocalAPI",
                                isRunning: (s.BackendState ?? "") == "Running",
-                               selfDNSName: s.Self?.DNSName ?? "",
-                               selfIPs: s.Self?.TailscaleIPs ?? [])
+                               selfDNSName: me?.DNSName ?? "",
+                               selfIPs: me?.TailscaleIPs ?? [])
     }
 
     func listPeers() async throws -> [Device] {
         let s = try await get("/localapi/v1/status", as: TSStatus.self)
-        let selfID = s.Self?.ID ?? ""
+        let selfID = s.SelfNode?.ID ?? ""
         return (s.Peer ?? [:]).values
             .filter { $0.ID != selfID }
             .map { p in
@@ -102,8 +103,14 @@ private struct TSStatus: Decodable {
     var BackendState: String?
     var Version: String?
     var Health: [String]?
-    var Self: TSNode?
+    var SelfNode: TSNode?
     var Peer: [String: TSNode]?
+
+    private enum CodingKeys: String, CodingKey {
+        case BackendState, Version, Health
+        case SelfNode = "Self"
+        case Peer
+    }
 }
 
 private struct TSNode: Decodable {
