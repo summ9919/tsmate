@@ -13,7 +13,7 @@ concurrency:
 jobs:
   build:
     name: Build iOS App (unsigned -> ad-hoc sign)
-    runs-on: macos-14
+    runs-on: macos-15
     timeout-minutes: 30
     env:
       SCHEME: TSMate
