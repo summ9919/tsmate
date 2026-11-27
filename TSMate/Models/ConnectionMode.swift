@@ -26,23 +26,23 @@ enum ConnectionMode: String, CaseIterable, Identifiable, Codable {
         }
     }
 
-    /// 写回 tailnet 偏好时实际改动的字段（显示在日志里）
+    /// 这个模式实际会调用的真实 Tailscale API
     var apiEffect: String {
         switch self {
-        case .p2p: return "清空 ExitNode、RouteAll=false、AdvertiseExitNode=false"
-        case .relay: return "清空 ExitNode、RouteAll=false、NoPortForwarding=true"
-        case .forced: return "清空 ExitNode、RouteAll=false、ShieldsUp=false、CorpDNS=true"
-        case .subnet: return "RouteAll=true、WantRunning=true"
+        case .p2p: return "启用 MagicDNS（会用 100.x 域名直连对端）"
+        case .relay: return "启用 MagicDNS，允许 DERP 兜底"
+        case .forced: return "启用 MagicDNS + 写入国内 DNS（223.5.5.5 / 114.114.114.114）"
+        case .subnet: return "启用所有设备已发布的子网路由（POST /device/{id}/routes）"
         }
     }
 
-    /// 面向用户的一句话说明（详情页展示）
+    /// 面向用户的一句话说明
     var explain: String {
         switch self {
-        case .p2p: return "关闭出口节点与全量路由，优先尝试 UDP 打洞直连对端"
-        case .relay: return "关闭出口节点并停用端口转发，允许走 DERP 中继，弱网更稳"
-        case .forced: return "禁用出口节点与防火墙屏蔽、保持 MagicDNS，国内直连不绕路"
-        case .subnet: return "打开 RouteAll，启用子网路由（需对端已发布 subnet routes）"
+        case .p2p: return "打开 MagicDNS，用设备名直连对端，优先走 UDP 打洞路径"
+        case .relay: return "打开 MagicDNS，直连不通时允许 DERP 中继兜底"
+        case .forced: return "打开 MagicDNS 并把全局 DNS 指向国内解析，避免绕路境外"
+        case .subnet: return "批准每台设备已发布的子网路由，让对端子网可经 Tailnet 访问"
         }
     }
 }

@@ -6,7 +6,7 @@ struct TopBar: View {
     var body: some View {
         HStack(spacing: 10) {
             Button {
-                model.isMenuOpen.toggle()
+                model.openMenu()
             } label: {
                 Image(systemName: "line.3.horizontal")
                     .font(.system(size: 17, weight: .semibold))
@@ -26,6 +26,12 @@ struct TopBar: View {
                         }
                     }
                 }
+                Divider()
+                Button {
+                    model.openSettings()
+                } label: {
+                    Label("设置", systemImage: "gearshape")
+                }
             } label: {
                 HStack(spacing: 4) {
                     Image(systemName: "shield.lefthalf.filled")
@@ -34,9 +40,15 @@ struct TopBar: View {
                     Text(model.mode.rawValue)
                         .font(.system(size: 14, weight: .semibold))
                         .foregroundColor(Theme.ink)
-                    Image(systemName: "chevron.down")
-                        .font(.system(size: 10, weight: .bold))
-                        .foregroundColor(Theme.subText)
+                    if model.applyingMode != nil {
+                        ProgressView()
+                            .scaleEffect(0.5)
+                            .frame(width: 10, height: 10)
+                    } else {
+                        Image(systemName: "chevron.down")
+                            .font(.system(size: 10, weight: .bold))
+                            .foregroundColor(Theme.subText)
+                    }
                 }
                 .padding(.horizontal, 10)
                 .padding(.vertical, 6)
@@ -56,14 +68,19 @@ struct TopBar: View {
                 .font(.system(size: 12, weight: .medium))
                 .foregroundColor(Theme.subText)
 
-            Circle()
-                .fill(Theme.brand)
-                .frame(width: 28, height: 28)
-                .overlay(
-                    Text("TS")
-                        .font(.system(size: 11, weight: .bold))
-                        .foregroundColor(.white)
-                )
+            Button {
+                model.openAccount()
+            } label: {
+                Circle()
+                    .fill(Theme.brand)
+                    .frame(width: 28, height: 28)
+                    .overlay(
+                        Text("TS")
+                            .font(.system(size: 11, weight: .bold))
+                            .foregroundColor(.white)
+                    )
+            }
+            .buttonStyle(.plain)
 
             Button {
                 model.openTailscaleApp()
@@ -71,15 +88,6 @@ struct TopBar: View {
                 Image(systemName: "power.circle.fill")
                     .font(.system(size: 17))
                     .foregroundColor(model.status.isRunning ? Theme.okGreen : Theme.subText)
-            }
-            .buttonStyle(.plain)
-
-            Button {
-                model.openSettings()
-            } label: {
-                Image(systemName: "gearshape.fill")
-                    .font(.system(size: 16))
-                    .foregroundColor(Theme.ink)
             }
             .buttonStyle(.plain)
 

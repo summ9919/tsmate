@@ -62,14 +62,14 @@ enum JSONValue: Codable, Equatable {
 }
 
 /// Tailscale Admin API 的设备对象子集。
-/// 注意：真实返回里 clientConnectivity 是「区域 → 连接信息」的字典，
-/// 也有版本直接返回单个对象，这里做兼容解析。
+/// 注意：真实返回里 clientConnectivity 是单个对象，不是「区域 → 连接信息」的字典；
+/// 它只在 `?fields=all` 时出现，default 字段集不包含它。
 struct TailscaleAPIDevice: Decodable, Identifiable {
     struct Connectivity: Decodable {
-        var active: Bool?
-        var lastSeen: String?
-        var relay: String?
-        var curAddr: String?
+        var endpoints: [String]?
+        var mappingVariesByDestIP: Bool?
+        var udp: Bool?
+        var ipv6: Bool?
     }
 
     var id: String
@@ -81,12 +81,14 @@ struct TailscaleAPIDevice: Decodable, Identifiable {
     var authorized: Bool?
     var clientVersion: String?
     var lastSeen: String?
-    var relay: String?
-    var clientConnectivity: [String: Connectivity]?
+    var isExternal: Bool?
+    var blocksIncomingConnections: Bool?
+    var clientConnectivity: Connectivity?
 
     enum CodingKeys: String, CodingKey {
         case id, nodeId, name, hostName, os, addresses, authorized
-        case clientVersion, lastSeen, relay, clientConnectivity
+        case clientVersion, lastSeen, isExternal, blocksIncomingConnections
+        case clientConnectivity
     }
 
     init(from decoder: Decoder) throws {
@@ -100,18 +102,12 @@ struct TailscaleAPIDevice: Decodable, Identifiable {
         authorized = (try? c.decode(Bool.self, forKey: .authorized))
         clientVersion = (try? c.decode(String.self, forKey: .clientVersion))
         lastSeen = (try? c.decode(String.self, forKey: .lastSeen))
-        relay = (try? c.decode(String.self, forKey: .relay))
-
-        if let map = (try? c.decode([String: Connectivity].self, forKey: .clientConnectivity)) {
-            clientConnectivity = map
-        } else if let single = (try? c.decode(Connectivity.self, forKey: .clientConnectivity)) {
-            clientConnectivity = ["_": single]
-        } else {
-            clientConnectivity = nil
-        }
+        isExternal = (try? c.decode(Bool.self, forKey: .isExternal))
+        blocksIncomingConnections = (try? c.decode(Bool.self, forKey: .blocksIncomingConnections))
+        clientConnectivity = (try? c.decode(Connectivity.self, forKey: .clientConnectivity))
     }
 
-    /// 展示名：优先短主机名，其次去掉 .ts.net 后缀的 name，最后用 id
+    /// 展示名：优先主机名，其次去掉 .ts.net 后缀的 name，最后用 id
     var displayName: String {
         if let value = hostName, !value.isEmpty { return value }
         if let value = name, !value.isEmpty {
@@ -133,35 +129,50 @@ struct TailscaleAPIDevice: Decodable, Identifiable {
         return authorized ?? true
     }
 
-    /// 是否在线：任一区域连接 active
+    /// 真实在线判定：官方 API 没有布尔型 online 字段，只有 lastSeen。
+    /// 规则：已授权 + 非外部设备 + lastSeen 在 2 分钟内 → 在线，否则离线。
     var isOnline: Bool {
-        if !isAuthorized { return false }
-        if let map = clientConnectivity, !map.isEmpty {
-            for value in map.values where value.active == true { return true }
-            return false
-        }
-        return authorized ?? true
+        guard isAuthorized else { return false }
+        if isExternal == true { return false }
+        if blocksIncomingConnections == true { return false }
+        guard let seen = lastSeen, !seen.isEmpty else { return false }
+        return TailscaleAPIDevice.recent(seen, within: 120)
     }
 
-    /// 中继节点名（DERP 区域）
-    var relayName: String {
-        if let map = clientConnectivity {
-            for value in map.values where value.active == true {
-                if let relay = value.relay, !relay.isEmpty { return relay }
-            }
-        }
-        return relay ?? ""
+    static func recent(_ text: String, within: TimeInterval) -> Bool {
+        guard let date = parseTime(text) else { return false }
+        return Date().timeIntervalSince(date) <= within
     }
 
-    /// 最近在线时间
+    /// 最近在线时间的可读形式
     var lastSeenText: String {
-        if let value = lastSeen, !value.isEmpty { return value }
-        if let map = clientConnectivity {
-            for value in map.values {
-                if let seen = value.lastSeen, !seen.isEmpty { return seen }
-            }
-        }
-        return ""
+        guard let value = lastSeen, !value.isEmpty else { return "" }
+        guard let date = TailscaleAPIDevice.parseTime(value) else { return value }
+        let seconds = Int(Date().timeIntervalSince(date))
+        if seconds < 0 { return value }
+        if seconds < 60 { return "刚刚" }
+        if seconds < 3600 { return "\(seconds / 60) 分钟前" }
+        if seconds < 86400 { return "\(seconds / 3600) 小时前" }
+        return "\(seconds / 86400) 天前"
+    }
+
+    /// 是否拿到了打洞地址（有 endpoints 才有直连可能）
+    var hasDirectPath: Bool {
+        if let list = clientConnectivity?.endpoints, !list.isEmpty { return true }
+        return false
+    }
+
+    var supportsUDP: Bool {
+        return clientConnectivity?.udp ?? false
+    }
+
+    static func parseTime(_ text: String) -> Date? {
+        let withFraction = ISO8601DateFormatter()
+        withFraction.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        if let date = withFraction.date(from: text) { return date }
+        let plain = ISO8601DateFormatter()
+        plain.formatOptions = [.withInternetDateTime]
+        return plain.date(from: text)
     }
 }
 
@@ -170,6 +181,9 @@ struct TailscaleAPIError: LocalizedError {
     let message: String
 
     var errorDescription: String? {
+        if statusCode == 404 {
+            return "Tailscale API 404：接口不存在（检查 tailnet 名称或 API Key 权限）"
+        }
         return "Tailscale API \(statusCode)：\(message)"
     }
 }
@@ -216,9 +230,11 @@ final class TailscaleAPIClient {
         var devices: [TailscaleAPIDevice]?
     }
 
-    /// 真实设备列表
+    /// 真实设备列表。
+    /// 必须带 fields=all，否则默认字段集不含 lastSeen / clientConnectivity，
+    /// 会让所有设备看起来都在线。
     func devices(tailnet: String, token: String) async throws -> [TailscaleAPIDevice] {
-        let path = "/tailnet/\(tailnet)/devices"
+        let path = "/tailnet/\(tailnet)/devices?fields=all"
         let data = try await perform("GET", path: path, token: token, body: nil)
         let response = try JSONDecoder().decode(DeviceListResponse.self, from: data)
         return response.devices ?? []
@@ -230,18 +246,50 @@ final class TailscaleAPIClient {
         _ = try await perform("POST", path: path, token: token, body: nil)
     }
 
-    /// 读取 tailnet 偏好（原始 JSON，保留未知字段）
-    func prefs(tailnet: String, token: String) async throws -> [String: JSONValue] {
-        let path = "/tailnet/\(tailnet)/prefs"
+    // MARK: - 真实可写的 tailnet 配置
+
+    /// MagicDNS 开关（真实端点 /tailnet/{tailnet}/dns/preferences）
+    func dnsPreferences(tailnet: String, token: String) async throws -> Bool {
+        let path = "/tailnet/\(tailnet)/dns/preferences"
         let data = try await perform("GET", path: path, token: token, body: nil)
-        let decoded = try JSONDecoder().decode([String: JSONValue].self, from: data)
-        return decoded
+        let obj = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+        return obj?["magicDNS"] as? Bool ?? false
     }
 
-    /// 写回 tailnet 偏好
-    func updatePrefs(_ prefs: [String: JSONValue], tailnet: String, token: String) async throws {
-        let path = "/tailnet/\(tailnet)/prefs"
-        let body = try JSONEncoder().encode(prefs)
+    func setMagicDNS(_ enabled: Bool, tailnet: String, token: String) async throws {
+        let path = "/tailnet/\(tailnet)/dns/preferences"
+        let body = try JSONSerialization.data(withJSONObject: ["magicDNS": enabled])
+        _ = try await perform("POST", path: path, token: token, body: body)
+    }
+
+    /// 全局 DNS 列表（真实端点 /tailnet/{tailnet}/dns/nameservers）
+    func nameservers(tailnet: String, token: String) async throws -> [String] {
+        let path = "/tailnet/\(tailnet)/dns/nameservers"
+        let data = try await perform("GET", path: path, token: token, body: nil)
+        let obj = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+        return obj?["dns"] as? [String] ?? []
+    }
+
+    func setNameservers(_ list: [String], tailnet: String, token: String) async throws {
+        let path = "/tailnet/\(tailnet)/dns/nameservers"
+        let body = try JSONSerialization.data(withJSONObject: ["dns": list])
+        _ = try await perform("POST", path: path, token: token, body: body)
+    }
+
+    /// 某台设备已发布 / 已启用的子网路由（真实端点 /device/{deviceID}/routes）
+    func deviceRoutes(deviceID: String, token: String) async throws -> (advertised: [String], enabled: [String]) {
+        let path = "/device/\(deviceID)/routes"
+        let data = try await perform("GET", path: path, token: token, body: nil)
+        let obj = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+        let advertised = obj?["advertisedRoutes"] as? [String] ?? []
+        let enabled = obj?["enabledRoutes"] as? [String] ?? []
+        return (advertised, enabled)
+    }
+
+    /// 启用 / 停用某台设备的子网路由（真实端点 POST /device/{deviceID}/routes）
+    func setDeviceRoutes(_ routes: [String], deviceID: String, token: String) async throws {
+        let path = "/device/\(deviceID)/routes"
+        let body = try JSONSerialization.data(withJSONObject: ["routes": routes])
         _ = try await perform("POST", path: path, token: token, body: body)
     }
 }

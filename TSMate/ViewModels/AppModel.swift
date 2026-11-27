@@ -7,20 +7,22 @@ import UIKit
 enum AppSheet: Identifiable {
     case settings
     case device(Device)
+    case menu
+    case account
 
     var id: String {
         switch self {
         case .settings: return "settings"
         case .device(let device): return "device-" + device.id
+        case .menu: return "menu"
+        case .account: return "account"
         }
     }
 }
 
 /// App 主状态模型。
-/// 数据来源全部为真实探测 + Tailscale Admin API，不再写死。
+/// 数据来源全部为真实探测 + Tailscale Admin API。
 final class AppModel: ObservableObject {
-
-    // MARK: - 发布的真实状态
 
     @Published var devices: [Device] = SampleData.devices
     @Published var status: TailscaleStatus = .empty
@@ -30,15 +32,16 @@ final class AppModel: ObservableObject {
     @Published var isMenuOpen = false
     @Published var isRefreshing = false
     @Published var isUsingSampleData = true
-    /// 当前弹出的页面（同一时刻只弹一个）
     @Published var sheet: AppSheet?
     @Published var probingDeviceID: String = ""
     @Published var lastRefreshText = "—"
+    /// 正在写回的模式（非空表示有写回在进行）
+    @Published var applyingMode: ConnectionMode?
+    /// 最近一次模式写回结果文案
+    @Published var modeResultText = ""
 
     private let service: TailscaleServicing = TailscaleManager()
     private var refreshTask: Task<Void, Never>?
-
-    // MARK: - 派生数据
 
     var onlineCount: Int { devices.filter { $0.isOnline }.count }
 
@@ -51,22 +54,20 @@ final class AppModel: ObservableObject {
     var statusCards: [StatusCard] {
         let link = status.connectionType
         let stack = status.dualStack ? "双栈" : "单栈"
-        let path = status.relay.isEmpty ? "直连" : "中继"
-        let speed = "\(link) · \(stack)\(path) · \(status.latencyMs) ms · 丢包 \(lossPercent)%"
+        let path = status.directPath ? "直连" : "中继"
+        let speed = link + " · " + stack + path + " · " + String(status.latencyMs) + " ms · 丢包 " + String(lossPercent) + "%"
 
         let optimize: String
         if status.latencyMs == 0 {
             optimize = "探测中…"
         } else if status.latencyMs <= thresholdMs {
-            optimize = "\(status.latencyMs)ms 直连 √"
+            optimize = String(status.latencyMs) + "ms 直连 √"
         } else {
-            optimize = "\(status.latencyMs)ms 超阈值，正在强制直连"
+            optimize = String(status.latencyMs) + "ms 超阈值，正在强制直连"
         }
 
         let launch = status.isRunning ? "已打开 · Tailscale里点连接" : "已关闭 · 请在 Tailscale 中打开"
-        let sdwan = status.lanIPv4.isEmpty
-            ? "本机 LAN 未获取"
-            : "\(status.lanIPv4) · \(status.latencyMs)ms"
+        let sdwan = status.lanIPv4.isEmpty ? "本机 LAN 未获取" : status.lanIPv4 + " · " + String(status.latencyMs) + "ms"
 
         return [
             StatusCard(id: "speed", icon: .bolt, title: "组网速率", detail: speed),
@@ -96,7 +97,6 @@ final class AppModel: ObservableObject {
 
     // MARK: - 真实刷新
 
-    /// 拉取本机真实网络状态 + 真实设备列表
     @MainActor
     func refresh() async {
         guard !isRefreshing else { return }
@@ -108,13 +108,12 @@ final class AppModel: ObservableObject {
             status = newStatus
             lastRefreshText = AppModel.nowStamp()
         } catch {
-            appendLog("本机状态探测失败：\(error.localizedDescription)")
+            appendLog("本机状态探测失败：" + error.localizedDescription)
         }
 
         do {
             let peers = try await service.listPeers()
             if !peers.isEmpty {
-                // 保留上轮实测时延
                 var merged: [Device] = []
                 for var device in peers {
                     if let old = devices.first(where: { $0.id == device.id }) {
@@ -127,13 +126,12 @@ final class AppModel: ObservableObject {
                 await probeAllDevices()
             }
         } catch {
-            appendLog("设备列表拉取失败：\(error.localizedDescription)")
+            appendLog("设备列表拉取失败：" + error.localizedDescription)
         }
 
         await enforcePolicy()
     }
 
-    /// 对所有在线设备做真实 TCP 时延探测（并发，逐台写回）
     @MainActor
     private func probeAllDevices() async {
         let targets = devices.filter { $0.status == .online && !$0.fullIP.isEmpty }
@@ -146,23 +144,18 @@ final class AppModel: ObservableObject {
         }
     }
 
-    /// 策略：时延超过阈值立即断开重连，强制改走国内直连
+    /// 策略：时延超过阈值立即切强制直连（真实写回 tailnet 配置）
     @MainActor
     private func enforcePolicy() async {
         let threshold = thresholdMs
         guard status.latencyMs > 0, status.latencyMs > threshold, mode != .forced else { return }
-        appendLog("时延 \(status.latencyMs)ms 超过 \(threshold)ms，执行断开重连并强制改走国内直连")
+        appendLog("时延 " + String(status.latencyMs) + "ms 超过 " + String(threshold) + "ms，执行断开重连并强制改走国内直连")
         mode = .forced
-        do {
-            try await service.switchMode(.forced)
-        } catch {
-            appendLog("强制直连写回失败：\(error.localizedDescription)")
-        }
+        await applyMode(.forced)
     }
 
     // MARK: - 设备交互
 
-    /// 单台设备重新探测时延
     func probeDevice(_ device: Device) {
         probingDeviceID = device.id
         Task { [weak self] in
@@ -173,21 +166,35 @@ final class AppModel: ObservableObject {
                     self.devices[index].latencyMs = ms
                 }
                 self.probingDeviceID = ""
+                self.appendLog("实测 " + device.name + "：" + (ms > 0 ? String(ms) + " ms" : "不可达"))
             }
         }
     }
 
-    /// 授权一台待入网设备
     func authorizeDevice(_ device: Device) {
-        appendLog("正在授权设备 \(device.name)…")
+        appendLog("正在授权设备 " + device.name + "…")
         Task { [weak self] in
             guard let self else { return }
             do {
                 try await self.service.authorize(deviceID: device.id)
-                self.appendLog("设备 \(device.name) 已授权，正在重新拉取列表")
+                self.appendLog("设备 " + device.name + " 已授权，正在重新拉取列表")
                 await self.refresh()
             } catch {
-                self.appendLog("授权失败：\(error.localizedDescription)")
+                self.appendLog("授权失败：" + error.localizedDescription)
+            }
+        }
+    }
+
+    func toggleSubnetRoutes(for device: Device) {
+        let enable = device.enabledRoutes.isEmpty
+        appendLog(enable ? "正在启用 " + device.name + " 的子网路由…" : "正在停用 " + device.name + " 的子网路由…")
+        Task { [weak self] in
+            guard let self else { return }
+            do {
+                try await self.service.setDeviceSubnetRoutes(device, enabled: enable)
+                await self.refresh()
+            } catch {
+                self.appendLog("子网路由设置失败：" + error.localizedDescription)
             }
         }
     }
@@ -198,13 +205,23 @@ final class AppModel: ObservableObject {
         guard newMode != mode else { return }
         mode = newMode
         appendLog(newMode.logDescription)
-        Task { [weak self] in
-            guard let self else { return }
-            do {
-                try await self.service.switchMode(newMode)
-            } catch {
-                self.appendLog("模式写回失败：\(error.localizedDescription)")
-            }
+        Task { await applyMode(newMode) }
+    }
+
+    /// 真实写回：调用 Tailscale API 并刷新状态
+    @MainActor
+    func applyMode(_ newMode: ConnectionMode) async {
+        applyingMode = newMode
+        modeResultText = "正在写回…"
+        defer { applyingMode = nil }
+        do {
+            try await service.switchMode(newMode)
+            modeResultText = newMode.rawValue + " 已生效"
+            appendLog("模式写回成功：" + newMode.rawValue + "（" + newMode.apiEffect + "）")
+            await refresh()
+        } catch {
+            modeResultText = "写回失败：" + error.localizedDescription
+            appendLog("模式写回失败：" + error.localizedDescription)
         }
     }
 
@@ -212,15 +229,13 @@ final class AppModel: ObservableObject {
         autoJoinNewDevice.toggle()
         let enabled = autoJoinNewDevice
         UserDefaults.standard.set(enabled, forKey: "tsmate.autoJoin")
-        appendLog(enabled
-                  ? "已开启「新设备自动入网」，新设备将自动加入 Tailnet"
-                  : "已关闭「新设备自动入网」")
+        appendLog(enabled ? "已开启「新设备自动入网」，新设备将自动加入 Tailnet" : "已关闭「新设备自动入网」")
         Task { [weak self] in
             guard let self else { return }
             do {
                 try await self.service.setAutoJoin(enabled)
             } catch {
-                self.appendLog("自动入网设置失败：\(error.localizedDescription)")
+                self.appendLog("自动入网设置失败：" + error.localizedDescription)
             }
         }
     }
@@ -235,22 +250,22 @@ final class AppModel: ObservableObject {
         }
     }
 
-    /// 打开 Tailscale 官方 App（iOS 上隧道必须由官方 App 建立）
     func openTailscaleApp() {
         guard let url = URL(string: "tailscale://") else { return }
         UIApplication.shared.open(url, options: [:], completionHandler: nil)
         appendLog("已跳转 Tailscale App，请在官方客户端中点击连接")
     }
 
-    /// 打开设置页
-    func openSettings() {
-        sheet = .settings
+    func openSettings() { sheet = .settings }
+
+    func openMenu() {
+        isMenuOpen = true
+        sheet = .menu
     }
 
-    /// 打开设备详情页
-    func openDevice(_ device: Device) {
-        sheet = .device(device)
-    }
+    func openAccount() { sheet = .account }
+
+    func openDevice(_ device: Device) { sheet = .device(device) }
 
     func logout() {
         appendLog("已退出组网助手（隧道由 Tailscale 官方 App 管理）")

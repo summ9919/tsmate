@@ -42,7 +42,7 @@ struct Device: Identifiable, Codable, Hashable {
     var osName: String = ""
     /// 客户端版本
     var clientVersion: String = ""
-    /// 最近在线时间（原始字符串）
+    /// 最近在线时间（可读文本，如「3 分钟前」）
     var lastSeen: String = ""
     /// Node Key
     var nodeId: String = ""
@@ -50,6 +50,14 @@ struct Device: Identifiable, Codable, Hashable {
     var addresses: [String] = []
     /// 是否已被授权
     var isAuthorized: Bool = true
+    /// 是否外部共享设备
+    var isExternal: Bool = false
+    /// 是否拿到了 UDP 打洞地址
+    var hasDirectPath: Bool = false
+    /// 已发布的子网路由
+    var advertisedRoutes: [String] = []
+    /// 已启用的子网路由
+    var enabledRoutes: [String] = []
 
     var statusText: String { status.statusText }
 

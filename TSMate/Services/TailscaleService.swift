@@ -1,29 +1,24 @@
 import Foundation
 
-/// 本机真实组网状态（全部来自实时探测 / Tailscale API，不再写死）
+/// 本机真实组网状态（全部来自实时探测 / Tailscale API）
 struct TailscaleStatus: Equatable {
-    /// 隧道状态：Running / Stopped
     var backendState: String
-    /// 对端链路："" 表示直连，DERP 名表示中继
     var relay: String
-    /// 实测时延（毫秒），0 表示尚未测得
     var latencyMs: Int
-    /// 实测丢包率 0...1
     var packetLoss: Double
-    /// Wi-Fi / 蜂窝数据 / 有线
     var connectionType: String
-    /// 隧道是否已建立
     var isRunning: Bool
-    /// 本机 Tailscale DNS 名
     var selfDNSName: String
-    /// 本机 Tailscale 地址（IPv4 / IPv6）
     var selfIPs: [String]
-    /// 本机局域网地址
     var lanIPv4: String
-    /// 双栈（IPv4 + IPv6 同时可用）
     var dualStack: Bool
-    /// 实测目标说明
     var probeTarget: String
+    /// 本机是否拿到了 UDP 打洞地址（决定能不能 P2P）
+    var directPath: Bool
+    /// MagicDNS 是否开启（tailnet 真实配置）
+    var magicDNS: Bool
+    /// 全局 DNS 列表（tailnet 真实配置）
+    var nameservers: [String]
 
     static let empty = TailscaleStatus(backendState: "未知",
                                        relay: "",
@@ -35,7 +30,10 @@ struct TailscaleStatus: Equatable {
                                        selfIPs: [],
                                        lanIPv4: "",
                                        dualStack: false,
-                                       probeTarget: "")
+                                       probeTarget: "",
+                                       directPath: false,
+                                       magicDNS: false,
+                                       nameservers: [])
 }
 
 protocol TailscaleServicing {
@@ -46,15 +44,26 @@ protocol TailscaleServicing {
     func setHideIP(_ enabled: Bool) async throws
     func authorize(deviceID: String) async throws
     func probeLatency(for device: Device) async -> Int
+    func setDeviceSubnetRoutes(_ device: Device, enabled: Bool) async throws
 }
 
 /// 真实实现：
-/// 1) 本机隧道 / 链路 / 时延 / 丢包 → NetworkProbe（真实网卡 + TCP 握手）
-/// 2) 设备列表 / 待授权设备 / tailnet 偏好 → Tailscale Admin API
-/// 3) 模式切换 → 写回 tailnet 偏好（ExitNodeID / RouteAll / WantRunning）
+/// 1) 本机链路 / 时延 / 丢包 → NetworkProbe（真实网卡 + TCP 握手）
+/// 2) 设备列表 / 在线状态 / 待授权 → Admin API GET /tailnet/{tailnet}/devices?fields=all
+/// 3) 模式切换 → 真实写 tailnet 配置（MagicDNS / 全局 DNS / 子网路由）
+/// 注意：Tailscale 官方 API 没有 tailnet 级 ExitNode / RouteAll 偏好端点，
+/// 所以这里只写真实存在的端点，不再伪造 prefs 写回。
 final class TailscaleManager: TailscaleServicing {
     private let api = TailscaleAPIClient.shared
     private let settings = SettingsStore.shared
+
+    private var token: String {
+        return settings.apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private var tailnet: String {
+        return settings.tailnet.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
 
     // MARK: - 本机状态
 
@@ -69,13 +78,12 @@ final class TailscaleManager: TailscaleServicing {
         var loss = 0.0
         var target = ""
 
-        // 优先测局域网网关，其次国内公网 DNS（用于判断「国内直连」质量）
         if let gateway = NetworkProbe.gatewayIPv4() {
             let result = await NetworkProbe.probe(host: gateway, port: 80, attempts: 3, timeout: 1.2)
             if let ms = result.ms {
                 latency = ms
                 loss = result.loss
-                target = "网关 \(gateway)"
+                target = "网关 " + gateway
             }
         }
         if latency == 0 {
@@ -94,7 +102,14 @@ final class TailscaleManager: TailscaleServicing {
         if let value = tsIPv4 { ips.append(value) }
         if let value = tsIPv6 { ips.append(value) }
 
-        let dnsName = ips.isEmpty ? "" : "本机 (\(link))"
+        var magicDNS = false
+        var dnsList: [String] = []
+        if !token.isEmpty, !tailnet.isEmpty {
+            magicDNS = (try? await api.dnsPreferences(tailnet: tailnet, token: token)) ?? false
+            dnsList = (try? await api.nameservers(tailnet: tailnet, token: token)) ?? []
+        }
+
+        let dnsName = ips.isEmpty ? "" : "本机 (" + link + ")"
 
         return TailscaleStatus(backendState: connected ? "Running" : "Stopped",
                                relay: "",
@@ -106,21 +121,22 @@ final class TailscaleManager: TailscaleServicing {
                                selfIPs: ips,
                                lanIPv4: lan,
                                dualStack: (tsIPv4 != nil && tsIPv6 != nil),
-                               probeTarget: target)
+                               probeTarget: target,
+                               directPath: connected,
+                               magicDNS: magicDNS,
+                               nameservers: dnsList)
     }
 
     // MARK: - 设备列表
 
     func listPeers() async throws -> [Device] {
-        let token = settings.apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
-        let tailnet = settings.tailnet.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !token.isEmpty, !tailnet.isEmpty else {
-            LogStore.shared.append("未配置 Tailscale API Key / tailnet，设备列表暂不可用")
+            LogStore.shared.append("未配置 Tailscale API Key / tailnet，设备列表不可用")
             return []
         }
 
         let remote = try await api.devices(tailnet: tailnet, token: token)
-        LogStore.shared.append("已从 Tailscale API 拉取 \(remote.count) 台设备")
+        LogStore.shared.append("已从 Tailscale API 拉取 " + String(remote.count) + " 台设备")
 
         var result: [Device] = []
         for item in remote {
@@ -131,10 +147,12 @@ final class TailscaleManager: TailscaleServicing {
             var subtitle = osName
             if pending {
                 subtitle = "等待授权 · " + osName
-            } else if !item.relayName.isEmpty {
-                subtitle = osName + " · 中继 " + item.relayName
+            } else if item.isExternal == true {
+                subtitle = osName + " · 外部共享"
+            } else if item.hasDirectPath {
+                subtitle = osName + " · 可直连"
             } else {
-                subtitle = osName + " · 直连"
+                subtitle = osName + " · 中继"
             }
 
             var device = Device(id: item.id,
@@ -150,19 +168,25 @@ final class TailscaleManager: TailscaleServicing {
             device.nodeId = item.nodeId ?? ""
             device.addresses = item.addresses ?? []
             device.isAuthorized = item.isAuthorized
+            device.isExternal = item.isExternal == true
+            device.hasDirectPath = item.hasDirectPath
+
+            if let routes = try? await api.deviceRoutes(deviceID: item.nodeId ?? item.id, token: token) {
+                device.advertisedRoutes = routes.advertised
+                device.enabledRoutes = routes.enabled
+            }
+
             result.append(device)
         }
 
-        let sorted = result.sorted { left, right in
+        return result.sorted { left, right in
             if left.status.sortOrder != right.status.sortOrder {
                 return left.status.sortOrder < right.status.sortOrder
             }
             return left.name < right.name
         }
-        return sorted
     }
 
-    /// 按操作系统给出常用管理端口
     static func defaultPort(forOS os: String) -> Int {
         let value = os.lowercased()
         if value.contains("windows") { return 445 }
@@ -171,7 +195,6 @@ final class TailscaleManager: TailscaleServicing {
 
     // MARK: - 单设备真实时延探测
 
-    /// 对某台设备做真实 TCP 握手探测（返回毫秒；0 表示不可达）
     func probeLatency(for device: Device) async -> Int {
         guard !device.fullIP.isEmpty else { return 0 }
         let ports: [UInt16] = [UInt16(device.port), 22, 445, 80]
@@ -183,62 +206,78 @@ final class TailscaleManager: TailscaleServicing {
         return 0
     }
 
-    // MARK: - 模式切换
+    // MARK: - 模式切换（只调用真实存在的端点）
 
     func switchMode(_ mode: ConnectionMode) async throws {
-        let token = settings.apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
-        let tailnet = settings.tailnet.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !token.isEmpty, !tailnet.isEmpty else {
             LogStore.shared.append("模式切换未落地：缺少 API Key / tailnet（仅本地记录）")
             return
         }
 
-        var prefs = try await api.prefs(tailnet: tailnet, token: token)
-
         switch mode {
-        case .p2p:
-            prefs["ExitNodeID"] = .string("")
-            prefs["ExitNodeIP"] = .string("")
-            prefs["RouteAll"] = .bool(false)
-            prefs["WantRunning"] = .bool(true)
-            prefs["AdvertiseExitNode"] = .bool(false)
-        case .relay:
-            prefs["ExitNodeID"] = .string("")
-            prefs["ExitNodeIP"] = .string("")
-            prefs["RouteAll"] = .bool(false)
-            prefs["WantRunning"] = .bool(true)
-            prefs["NoPortForwarding"] = .bool(true)
-        case .forced:
-            prefs["ExitNodeID"] = .string("")
-            prefs["ExitNodeIP"] = .string("")
-            prefs["RouteAll"] = .bool(false)
-            prefs["WantRunning"] = .bool(true)
-            prefs["ShieldsUp"] = .bool(false)
-            prefs["CorpDNS"] = .bool(true)
-        case .subnet:
-            prefs["RouteAll"] = .bool(true)
-            prefs["WantRunning"] = .bool(true)
-        }
+        case .p2p, .relay, .forced:
+            // MagicDNS 是真实可写项：打开后用设备名直连
+            try await api.setMagicDNS(true, tailnet: tailnet, token: token)
 
-        try await api.updatePrefs(prefs, tailnet: tailnet, token: token)
-        LogStore.shared.append("模式已写回 tailnet 偏好：\(mode.rawValue)（\(mode.apiEffect)）")
+            if mode == .forced {
+                // 强制直连：全局 DNS 指向国内解析，避免绕路境外
+                try await api.setNameservers(["223.5.5.5", "114.114.114.114"], tailnet: tailnet, token: token)
+            }
+
+            LogStore.shared.append("模式已写回 tailnet：" + mode.rawValue + "（" + mode.apiEffect + "）")
+
+        case .subnet:
+            try await api.setMagicDNS(true, tailnet: tailnet, token: token)
+            let remote = try await api.devices(tailnet: tailnet, token: token)
+            var enabledCount = 0
+            var skipped = 0
+            for item in remote {
+                let routes = try await api.deviceRoutes(deviceID: item.nodeId ?? item.id, token: token)
+                if routes.advertised.isEmpty {
+                    skipped += 1
+                    continue
+                }
+                try await api.setDeviceRoutes(routes.advertised, deviceID: item.nodeId ?? item.id, token: token)
+                enabledCount += 1
+                LogStore.shared.append("已启用子网路由：" + item.displayName + " → " + routes.advertised.joined(separator: ", "))
+            }
+            LogStore.shared.append("子网路由已启用 " + String(enabledCount) + " 台，跳过 " + String(skipped) + " 台（无已发布路由）")
+        }
+    }
+
+    // MARK: - 单台设备子网路由开关（详情页用）
+
+    func setDeviceSubnetRoutes(_ device: Device, enabled: Bool) async throws {
+        guard !token.isEmpty else {
+            LogStore.shared.append("子网路由未落地：缺少 API Key")
+            return
+        }
+        let id = device.nodeId.isEmpty ? device.id : device.nodeId
+        if enabled {
+            guard !device.advertisedRoutes.isEmpty else {
+                LogStore.shared.append("该设备没有已发布的子网路由，无法启用")
+                return
+            }
+            try await api.setDeviceRoutes(device.advertisedRoutes, deviceID: id, token: token)
+            LogStore.shared.append("已启用 " + device.name + " 的子网路由：" + device.advertisedRoutes.joined(separator: ", "))
+        } else {
+            try await api.setDeviceRoutes([], deviceID: id, token: token)
+            LogStore.shared.append("已停用 " + device.name + " 的子网路由")
+        }
     }
 
     // MARK: - 自动入网 / 单台授权
 
     func authorize(deviceID: String) async throws {
-        let token = settings.apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !token.isEmpty else {
             LogStore.shared.append("授权未落地：缺少 API Key")
             return
         }
         try await api.authorize(deviceID: deviceID, token: token)
-        LogStore.shared.append("已授权设备 \(deviceID)")
+        LogStore.shared.append("已授权设备 " + deviceID)
     }
 
     func setAutoJoin(_ enabled: Bool) async throws {
-        let token = settings.apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
-        let tailnet = settings.tailnet.trimmingCharacters(in: .whitespacesAndNewlines)
         guard enabled else {
             LogStore.shared.append("自动入网已关闭")
             return
@@ -253,7 +292,7 @@ final class TailscaleManager: TailscaleServicing {
         for item in remote where !item.isAuthorized {
             try await api.authorize(deviceID: item.id, token: token)
             approved += 1
-            LogStore.shared.append("已授权新设备：\(item.displayName)")
+            LogStore.shared.append("已授权新设备：" + item.displayName)
         }
         if approved == 0 {
             LogStore.shared.append("自动入网检查完成：没有待授权设备")
