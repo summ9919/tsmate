@@ -26,17 +26,20 @@ struct AppView: View {
         .background(Theme.bg.ignoresSafeArea())
         .onAppear { model.start() }
         .onDisappear { model.stop() }
-        .sheet(item: $model.sheet) { sheet in
-            switch sheet {
-            case .settings:
-                SettingsView()
-            case .device(let device):
-                DeviceDetailView(model: model, device: device)
-            case .menu:
-                MenuSheet(model: model)
-            case .account:
-                AccountSheet(model: model)
-            }
+        .sheet(item: $model.sheet, content: presentSheet) 
+    }
+
+    @ViewBuilder
+    private func presentSheet(_ sheet: AppSheet) -> some View {
+        switch sheet {
+        case .settings:
+            SettingsView()
+        case .device(let device):
+            DeviceDetailView(model: model, device: device)
+        case .menu:
+            MenuSheet(model: model)
+        case .account:
+            AccountSheet(model: model)
         }
     }
 }
