@@ -3,7 +3,7 @@ import SwiftUI
 /// 单台设备详情：真实地址、实测时延、授权状态、子网路由开关
 struct DeviceDetailView: View {
     @ObservedObject var model: AppModel
-    @Environment(.dismiss) private var dismiss
+    @Environment(\.dismiss) private var dismiss
     let device: Device
 
     var body: some View {
